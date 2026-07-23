@@ -6,6 +6,8 @@ the shared Copilot session store, including Copilot App chats and project
 workspaces, and resumes selected session UUIDs through GitHub Copilot CLI.
 On phones, selecting a session opens a full-height chat view with touch-sized
 controls, a keyboard-safe composer, and back navigation to the session list.
+Consecutive Copilot assistant events are presented as one response, with safe
+GitHub-flavored Markdown rendering for lists, links, tables, and code blocks.
 
 ## Run locally
 

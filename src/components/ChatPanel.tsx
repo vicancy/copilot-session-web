@@ -13,6 +13,8 @@ import {
   UserRound,
   Wrench,
 } from 'lucide-react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   getBridgeHealth,
   getSessionHistory,
@@ -336,16 +338,36 @@ export function ChatPanel({ session }: { session: Session }) {
                       : 'Copilot'}
                 </strong>
               )}
-              <p>
-                {message.content ||
-                  (isSending && message.id.startsWith('assistant-') ? (
+              {message.content ? (
+                message.role === 'assistant' ? (
+                  <div className="message-markdown">
+                    <Markdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        a: ({ node: _node, ...props }) => (
+                          <a
+                            {...props}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                          />
+                        ),
+                      }}
+                    >
+                      {message.content}
+                    </Markdown>
+                  </div>
+                ) : (
+                  <p>{message.content}</p>
+                )
+              ) : isSending && message.id.startsWith('assistant-') ? (
+                <p>
                     <span className="typing-indicator">
                       <i />
                       <i />
                       <i />
                     </span>
-                  ) : null)}
-              </p>
+                </p>
+              ) : null}
             </div>
           </div>
         ))}

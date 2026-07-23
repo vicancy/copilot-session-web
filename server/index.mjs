@@ -282,7 +282,7 @@ async function getSessionMessages(sessionId) {
 
   try {
     const events = await session.getEvents()
-    return events
+    const messages = events
       .filter(
         (event) =>
           event.type === 'user.message' || event.type === 'assistant.message',
@@ -294,6 +294,21 @@ async function getSessionMessages(sessionId) {
         timestamp: event.timestamp,
       }))
       .filter((message) => message.content)
+
+    return messages
+      .reduce((grouped, message) => {
+        const previous = grouped[grouped.length - 1]
+        if (message.role === 'assistant' && previous?.role === 'assistant') {
+          grouped[grouped.length - 1] = {
+            ...previous,
+            content: `${previous.content}\n\n${message.content}`,
+            timestamp: message.timestamp,
+          }
+        } else {
+          grouped.push(message)
+        }
+        return grouped
+      }, [])
       .slice(-100)
   } finally {
     await session.disconnect()
