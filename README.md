@@ -8,6 +8,9 @@ On phones, selecting a session opens a full-height chat view with touch-sized
 controls, a keyboard-safe composer, and back navigation to the session list.
 Consecutive Copilot assistant events are presented as one response, with safe
 GitHub-flavored Markdown rendering for lists, links, tables, and code blocks.
+Chat initially focuses on the latest four conversation rounds; **Load more**
+reveals four earlier rounds at a time without shifting the current reading
+position.
 
 ## Run locally
 

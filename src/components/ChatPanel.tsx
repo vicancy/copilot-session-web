@@ -1,8 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import type { KeyboardEvent } from 'react'
 import {
   Bot,
   CheckCircle2,
+  ChevronUp,
   CircleStop,
   LoaderCircle,
   RefreshCw,
@@ -30,6 +38,9 @@ interface ChatMessage {
   role: MessageRole
   content: string
 }
+
+const INITIAL_VISIBLE_ROUNDS = 4
+const ROUNDS_PER_PAGE = 4
 
 const sessionStorageKey = (sessionId: string) =>
   `copilot-workspace:cli-session:${sessionId}`
@@ -61,6 +72,17 @@ function updateMessage(
   return messages.map((message) => (message.id === id ? updater(message) : message))
 }
 
+function groupConversationRounds(messages: ChatMessage[]) {
+  return messages.reduce<ChatMessage[][]>((rounds, message) => {
+    if (rounds.length === 0 || message.role === 'user') {
+      rounds.push([message])
+    } else {
+      rounds[rounds.length - 1].push(message)
+    }
+    return rounds
+  }, [])
+}
+
 export function ChatPanel({ session }: { session: Session }) {
   const [messages, setMessages] = useState<ChatMessage[]>(() =>
     loadMessages(session),
@@ -73,8 +95,29 @@ export function ChatPanel({ session }: { session: Session }) {
   const [historyLoading, setHistoryLoading] = useState(
     session.source !== 'local',
   )
+  const [visibleRoundCount, setVisibleRoundCount] = useState(
+    INITIAL_VISIBLE_ROUNDS,
+  )
   const abortController = useRef<AbortController | null>(null)
+  const messagesContainer = useRef<HTMLDivElement | null>(null)
   const scrollAnchor = useRef<HTMLDivElement | null>(null)
+  const pendingScrollRestore = useRef<{
+    scrollHeight: number
+    scrollTop: number
+  } | null>(null)
+
+  const conversationRounds = useMemo(
+    () => groupConversationRounds(messages),
+    [messages],
+  )
+  const hiddenRoundCount = Math.max(
+    0,
+    conversationRounds.length - visibleRoundCount,
+  )
+  const roundsToLoad = Math.min(ROUNDS_PER_PAGE, hiddenRoundCount)
+  const visibleMessages = conversationRounds
+    .slice(-visibleRoundCount)
+    .flat()
 
   useEffect(() => {
     const controller = new AbortController()
@@ -94,6 +137,7 @@ export function ChatPanel({ session }: { session: Session }) {
       setHistoryLoading(true)
       try {
         const history = await getSessionHistory(session.id, signal)
+        setVisibleRoundCount(INITIAL_VISIBLE_ROUNDS)
         setMessages(
           history.length > 0
             ? history.map((message) => ({
@@ -137,6 +181,16 @@ export function ChatPanel({ session }: { session: Session }) {
     scrollAnchor.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, session.id])
 
+  useLayoutEffect(() => {
+    const previous = pendingScrollRestore.current
+    const container = messagesContainer.current
+    if (!previous || !container) return
+
+    container.scrollTop =
+      previous.scrollTop + (container.scrollHeight - previous.scrollHeight)
+    pendingScrollRestore.current = null
+  }, [visibleRoundCount])
+
   useEffect(
     () => () => {
       abortController.current?.abort()
@@ -171,7 +225,7 @@ export function ChatPanel({ session }: { session: Session }) {
         break
       case 'tool':
         setMessages((current) => {
-          const id = `tool-${event.name}`
+          const id = `tool-${assistantMessageId}-${event.name}`
           const existing = current.some((message) => message.id === id)
           const content =
             event.status === 'complete'
@@ -275,6 +329,7 @@ export function ChatPanel({ session }: { session: Session }) {
 
   const resetOrReloadChat = () => {
     if (isSending) return
+    setVisibleRoundCount(INITIAL_VISIBLE_ROUNDS)
     if (session.source === 'local') {
       localStorage.removeItem(sessionStorageKey(session.id))
       localStorage.removeItem(messageStorageKey(session.id))
@@ -284,6 +339,19 @@ export function ChatPanel({ session }: { session: Session }) {
       void refreshHistory()
       setStreamStatus('Reloading history')
     }
+  }
+
+  const loadEarlierRounds = () => {
+    const container = messagesContainer.current
+    if (container) {
+      pendingScrollRestore.current = {
+        scrollHeight: container.scrollHeight,
+        scrollTop: container.scrollTop,
+      }
+    }
+    setVisibleRoundCount((current) =>
+      Math.min(current + ROUNDS_PER_PAGE, conversationRounds.length),
+    )
   }
 
   return (
@@ -316,8 +384,22 @@ export function ChatPanel({ session }: { session: Session }) {
         </button>
       </div>
 
-      <div className="chat-messages" aria-live="polite">
-        {messages.map((message) => (
+      <div
+        className="chat-messages"
+        aria-live="polite"
+        ref={messagesContainer}
+      >
+        {hiddenRoundCount > 0 && (
+          <div className="history-load-more">
+            <button type="button" onClick={loadEarlierRounds}>
+              <ChevronUp size={13} />
+              Load {roundsToLoad} earlier{' '}
+              {roundsToLoad === 1 ? 'round' : 'rounds'}
+            </button>
+            <span>{hiddenRoundCount} earlier rounds hidden</span>
+          </div>
+        )}
+        {visibleMessages.map((message) => (
           <div className={`chat-message ${message.role}`} key={message.id}>
             <div className="message-avatar">
               {message.role === 'user' ? (
@@ -361,11 +443,11 @@ export function ChatPanel({ session }: { session: Session }) {
                 )
               ) : isSending && message.id.startsWith('assistant-') ? (
                 <p>
-                    <span className="typing-indicator">
-                      <i />
-                      <i />
-                      <i />
-                    </span>
+                  <span className="typing-indicator">
+                    <i />
+                    <i />
+                    <i />
+                  </span>
                 </p>
               ) : null}
             </div>
