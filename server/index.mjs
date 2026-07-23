@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
@@ -273,6 +272,13 @@ async function getSessionMessages(sessionId) {
   const metadata = sessionCatalog.get(sessionId)
   if (!metadata) return null
 
+  const activeRun = [...activeRuns.values()].find(
+    (run) => run.sessionId === sessionId && run.session,
+  )
+  if (activeRun) {
+    return normalizeSessionMessages(await activeRun.session.getEvents())
+  }
+
   const client = await getSdkClient()
   const session = await client.resumeSession(sessionId, {
     suppressResumeEvent: true,
@@ -281,66 +287,102 @@ async function getSessionMessages(sessionId) {
   })
 
   try {
-    const events = await session.getEvents()
-    const messages = events
-      .filter(
-        (event) =>
-          event.type === 'user.message' || event.type === 'assistant.message',
-      )
-      .map((event) => ({
-        id: event.id,
-        role: event.type === 'user.message' ? 'user' : 'assistant',
-        content: truncateContent(event.data?.content, 20_000),
-        timestamp: event.timestamp,
-      }))
-      .filter((message) => message.content)
-
-    return messages
-      .reduce((grouped, message) => {
-        const previous = grouped[grouped.length - 1]
-        if (message.role === 'assistant' && previous?.role === 'assistant') {
-          grouped[grouped.length - 1] = {
-            ...previous,
-            content: `${previous.content}\n\n${message.content}`,
-            timestamp: message.timestamp,
-          }
-        } else {
-          grouped.push(message)
-        }
-        return grouped
-      }, [])
-      .slice(-100)
+    return normalizeSessionMessages(await session.getEvents())
   } finally {
     await session.disconnect()
   }
 }
 
-function getCopilotLaunch() {
-  if (process.env.COPILOT_CLI_ENTRY) {
-    return {
-      command: process.execPath,
-      prefixArguments: [resolve(process.env.COPILOT_CLI_ENTRY)],
+function normalizeSessionMessages(events) {
+  const timeline = []
+  const progressIndexes = new Map()
+  const toolNames = new Map()
+
+  const upsertProgress = (entry) => {
+    const existingIndex = progressIndexes.get(entry.id)
+    if (existingIndex === undefined) {
+      progressIndexes.set(entry.id, timeline.length)
+      timeline.push(entry)
+    } else {
+      timeline[existingIndex] = { ...timeline[existingIndex], ...entry }
     }
   }
 
-  if (process.platform === 'win32' && process.env.APPDATA) {
-    const loader = join(
-      process.env.APPDATA,
-      'npm',
-      'node_modules',
-      '@github',
-      'copilot',
-      'npm-loader.js',
-    )
-    if (existsSync(loader)) {
-      return { command: process.execPath, prefixArguments: [loader] }
+  for (const event of events) {
+    if (event.agentId) continue
+
+    if (event.type === 'user.message' || event.type === 'assistant.message') {
+      const content = truncateContent(event.data?.content, 20_000)
+      if (content) {
+        timeline.push({
+          id: event.id,
+          role: event.type === 'user.message' ? 'user' : 'assistant',
+          content,
+          timestamp: event.timestamp,
+        })
+      }
+    } else if (event.type === 'assistant.intent') {
+      const label = compactText(event.data?.intent, 500)
+      if (label) {
+        upsertProgress({
+          id: event.id,
+          role: 'progress',
+          progressKind: 'intent',
+          label,
+          status: 'complete',
+          content: '',
+          timestamp: event.timestamp,
+        })
+      }
+    } else if (event.type === 'assistant.reasoning') {
+      upsertProgress({
+        id: `reasoning-${event.data?.reasoningId || event.id}`,
+        role: 'progress',
+        progressKind: 'reasoning',
+        label: 'Reasoning complete',
+        status: 'complete',
+        content: '',
+        timestamp: event.timestamp,
+      })
+    } else if (
+      event.type === 'tool.execution_start' ||
+      event.type === 'tool.execution_complete'
+    ) {
+      const toolCallId = event.data?.toolCallId || event.id
+      if (event.data?.toolName) {
+        toolNames.set(toolCallId, String(event.data.toolName))
+      }
+      const tool = normalizeToolEvent(event, toolNames.get(toolCallId))
+      upsertProgress({
+        id: `tool-${toolCallId}`,
+        role: 'progress',
+        progressKind: 'tool',
+        label: tool.name,
+        status: tool.status,
+        content: '',
+        timestamp: event.timestamp,
+      })
     }
   }
 
-  return { command: 'copilot', prefixArguments: [] }
+  return timeline
+    .reduce((grouped, message) => {
+      const previous = grouped[grouped.length - 1]
+      if (message.role === 'assistant' && previous?.role === 'assistant') {
+        grouped[grouped.length - 1] = {
+          ...previous,
+          content: `${previous.content}\n\n${message.content}`,
+          timestamp: message.timestamp,
+        }
+      } else {
+        grouped.push(message)
+      }
+      return grouped
+    }, [])
+    .slice(-100)
 }
 
-function normalizeToolEvent(event) {
+function normalizeToolEvent(event, knownName = '') {
   const data = event.data || {}
   const request = data.toolRequest || data.request || {}
   const name =
@@ -348,11 +390,210 @@ function normalizeToolEvent(event) {
     data.name ||
     request.toolName ||
     request.name ||
+    knownName ||
     'Copilot tool'
 
   return {
     name: String(name),
     status: event.type.endsWith('complete') ? 'complete' : 'running',
+  }
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return ''
+  }
+}
+
+function describePermission(request) {
+  const kind = String(request?.kind || 'tool')
+  let title = 'Allow Copilot tool'
+  let detail = ''
+
+  switch (kind) {
+    case 'shell':
+      title = request.intention || 'Run a shell command'
+      detail = request.fullCommandText
+      break
+    case 'write':
+      title = request.intention || 'Modify a file'
+      detail = [request.fileName, request.diff].filter(Boolean).join('\n\n')
+      break
+    case 'read':
+      title = 'Read a file'
+      detail = request.fileName || request.path || ''
+      break
+    case 'url':
+      title = 'Access a URL'
+      detail = request.url || request.domain || ''
+      break
+    case 'mcp':
+      title = `Use ${request.toolName || 'an MCP tool'}`
+      detail = [
+        request.serverName || request.mcpServerName,
+        safeJson(request.args),
+      ]
+        .filter(Boolean)
+        .join('\n')
+      break
+    case 'custom-tool':
+      title = `Use ${request.toolName || 'a custom tool'}`
+      detail = safeJson(request.args)
+      break
+    default:
+      title = `Allow ${kind.replace(/[-_]/g, ' ')}`
+      detail = safeJson(request)
+  }
+
+  return {
+    kind: 'permission',
+    permissionKind: kind,
+    title: compactText(title, 240),
+    detail: typeof detail === 'string' ? detail.trim() : '',
+    canApproveSession: request?.canOfferSessionApproval === true,
+    elevated: request?.requestSandboxBypass === true,
+  }
+}
+
+function unavailableInteractionResult(interaction) {
+  switch (interaction.kind) {
+    case 'permission':
+      return {
+        kind: 'reject',
+        feedback: 'The browser disconnected before a decision was made.',
+      }
+    case 'user-input':
+      return {
+        answer: 'The user is no longer available.',
+        wasFreeform: true,
+      }
+    case 'plan':
+      return {
+        approved: false,
+        feedback: 'The browser disconnected before approving the plan.',
+      }
+  }
+}
+
+function requestInteraction(run, interaction) {
+  if (run.closed) {
+    return Promise.resolve(unavailableInteractionResult(interaction))
+  }
+
+  const requestId = randomUUID()
+  return new Promise((resolveInteraction) => {
+    run.pendingInteractions.set(requestId, {
+      interaction: { requestId, ...interaction },
+      resolve: resolveInteraction,
+    })
+    writeEvent(run.response, 'interaction', { requestId, ...interaction })
+  })
+}
+
+function settlePendingInteractions(run) {
+  for (const pending of run.pendingInteractions.values()) {
+    pending.resolve(unavailableInteractionResult(pending.interaction))
+  }
+  run.pendingInteractions.clear()
+}
+
+async function closeRun(run, abort = false) {
+  if (run.closed) return
+  run.closed = true
+  settlePendingInteractions(run)
+  run.unsubscribe?.()
+
+  if (run.session) {
+    if (abort) await run.session.abort().catch(() => {})
+    await run.session.disconnect().catch(() => {})
+  }
+  activeRuns.delete(run.runId)
+}
+
+function processSessionEvent(run, event) {
+  if (event.agentId) return
+
+  switch (event.type) {
+    case 'assistant.turn_start':
+      run.currentMessageStreamed = false
+      writeEvent(run.response, 'status', { status: 'thinking' })
+      break
+    case 'assistant.intent':
+      writeEvent(run.response, 'progress', {
+        id: event.id,
+        kind: 'intent',
+        label: compactText(event.data?.intent, 500) || 'Planning next step',
+        status: 'complete',
+      })
+      break
+    case 'assistant.reasoning_delta':
+      writeEvent(run.response, 'progress', {
+        id: `reasoning-${event.data?.reasoningId || event.id}`,
+        kind: 'reasoning',
+        label: 'Reasoning',
+        status: 'running',
+      })
+      writeEvent(run.response, 'status', { status: 'reasoning' })
+      break
+    case 'assistant.reasoning':
+      writeEvent(run.response, 'progress', {
+        id: `reasoning-${event.data?.reasoningId || event.id}`,
+        kind: 'reasoning',
+        label: 'Reasoning complete',
+        status: 'complete',
+      })
+      break
+    case 'assistant.message_start':
+      run.currentMessageStreamed = false
+      break
+    case 'assistant.message_delta': {
+      const content = event.data?.deltaContent
+      if (typeof content === 'string' && content) {
+        run.currentMessageStreamed = true
+        writeEvent(run.response, 'delta', { content })
+      }
+      break
+    }
+    case 'assistant.message':
+      if (
+        !run.currentMessageStreamed &&
+        typeof event.data?.content === 'string'
+      ) {
+        writeEvent(run.response, 'delta', { content: event.data.content })
+      }
+      run.currentMessageStreamed = false
+      writeEvent(run.response, 'message', {
+        model: event.data?.model || null,
+        outputTokens: event.data?.outputTokens || null,
+      })
+      break
+    case 'tool.execution_start':
+    case 'tool.execution_complete': {
+      const toolCallId = event.data?.toolCallId || event.id
+      if (event.data?.toolName) {
+        run.toolNames.set(toolCallId, String(event.data.toolName))
+      }
+      const tool = normalizeToolEvent(event, run.toolNames.get(toolCallId))
+      writeEvent(run.response, 'tool', tool)
+      writeEvent(run.response, 'progress', {
+        id: `tool-${toolCallId}`,
+        kind: 'tool',
+        label: tool.name,
+        status: tool.status,
+      })
+      break
+    }
+    case 'assistant.idle':
+    case 'session.idle':
+      writeEvent(run.response, 'status', { status: 'idle' })
+      break
+    case 'session.error':
+      writeEvent(run.response, 'error', {
+        message: event.data?.message || 'Copilot session failed.',
+      })
+      break
   }
 }
 
@@ -379,31 +620,6 @@ async function streamCopilot(request, response, body) {
   const runId = randomUUID()
   const allowTools = body.allowTools === true
   const runWorkspace = await getTrustedWorkingDirectory(body.sessionId)
-  const launch = getCopilotLaunch()
-  const argumentsList = [
-    ...launch.prefixArguments,
-    '-p',
-    message,
-    '--session-id',
-    sessionId,
-    '--mode',
-    mode,
-    '--allow-all-tools',
-    '--output-format',
-    'json',
-    '--stream',
-    'on',
-    '--no-color',
-    '--no-auto-update',
-    '--no-ask-user',
-    '--no-remote-export',
-    '-C',
-    runWorkspace,
-  ]
-
-  if (!allowTools) {
-    argumentsList.push('--deny-tool=shell', '--deny-tool=write')
-  }
 
   response.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -412,121 +628,169 @@ async function streamCopilot(request, response, body) {
     'X-Accel-Buffering': 'no',
   })
   response.flushHeaders()
+  const run = {
+    runId,
+    sessionId,
+    response,
+    session: null,
+    unsubscribe: null,
+    pendingInteractions: new Map(),
+    currentMessageStreamed: false,
+    toolNames: new Map(),
+    completed: false,
+    closed: false,
+  }
+  activeRuns.set(runId, run)
   writeEvent(response, 'session', { runId, sessionId, allowTools })
 
-  const child = spawn(launch.command, argumentsList, {
-    cwd: runWorkspace,
-    env: {
-      ...process.env,
-      FORCE_COLOR: '0',
-      NO_COLOR: '1',
+  const sessionConfig = {
+    clientName: 'copilot-session-web',
+    workingDirectory: runWorkspace,
+    streaming: true,
+    includeSubAgentStreamingEvents: false,
+    enableConfigDiscovery: true,
+    onPermissionRequest: async (permissionRequest) => {
+      if (run.closed) {
+        return unavailableInteractionResult({ kind: 'permission' })
+      }
+      if (allowTools) return { kind: 'approve-once' }
+      return requestInteraction(run, describePermission(permissionRequest))
     },
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
+    onUserInputRequest: (inputRequest) =>
+      requestInteraction(run, {
+        kind: 'user-input',
+        question: truncateContent(inputRequest.question, 4_000),
+        choices: Array.isArray(inputRequest.choices)
+          ? inputRequest.choices.slice(0, 20).map((choice) => String(choice))
+          : [],
+        allowFreeform: inputRequest.allowFreeform !== false,
+      }),
+    onExitPlanModeRequest: (planRequest) =>
+      requestInteraction(run, {
+        kind: 'plan',
+        summary: truncateContent(planRequest.summary, 4_000),
+        planContent: truncateContent(planRequest.planContent, 20_000),
+        actions: planRequest.actions.map(String),
+        recommendedAction: String(planRequest.recommendedAction),
+      }),
+  }
+
+  response.on('close', () => {
+    if (!run.completed) void closeRun(run, true)
   })
 
-  activeRuns.set(runId, child)
-  let stdoutBuffer = ''
-  let stderr = ''
-  let receivedDelta = false
-  let completed = false
-
-  const processLine = (line) => {
-    if (!line.trim()) return
-
-    let event
-    try {
-      event = JSON.parse(line)
-    } catch {
+  let completedNormally = false
+  try {
+    const client = await getSdkClient()
+    run.session = body.sessionId
+      ? await client.resumeSession(sessionId, {
+          ...sessionConfig,
+          suppressResumeEvent: true,
+          continuePendingWork: true,
+        })
+      : await client.createSession({
+          ...sessionConfig,
+          sessionId,
+        })
+    if (run.closed) {
+      await run.session.abort().catch(() => {})
+      await run.session.disconnect().catch(() => {})
       return
     }
+    run.unsubscribe = run.session.on((event) => processSessionEvent(run, event))
 
-    switch (event.type) {
-      case 'assistant.turn_start':
-        writeEvent(response, 'status', { status: 'thinking' })
-        break
-      case 'assistant.message_delta': {
-        const content = event.data?.deltaContent
-        if (typeof content === 'string' && content) {
-          receivedDelta = true
-          writeEvent(response, 'delta', { content })
-        }
-        break
+    await run.session.sendAndWait(
+      { prompt: message, agentMode: mode },
+      30 * 60 * 1_000,
+    )
+    completedNormally = true
+    if (!run.closed) {
+      sessionCatalogUpdatedAt = 0
+      writeEvent(response, 'done', { sessionId })
+    }
+  } catch (error) {
+    if (!run.closed) {
+      writeEvent(response, 'error', {
+        message:
+          error instanceof Error ? error.message : 'Copilot session failed.',
+      })
+    }
+  } finally {
+    run.completed = true
+    await closeRun(run, !completedNormally)
+    if (!response.writableEnded) response.end()
+  }
+}
+
+function resolveInteraction(run, requestId, body) {
+  const pending = run.pendingInteractions.get(requestId)
+  if (!pending) {
+    return { status: 409, error: 'This interaction is no longer pending.' }
+  }
+
+  const { interaction } = pending
+  let result
+
+  if (interaction.kind === 'permission') {
+    const decisions = ['approve-once', 'approve-for-session', 'reject']
+    if (!decisions.includes(body.decision)) {
+      return { status: 400, error: 'Invalid permission decision.' }
+    }
+    if (
+      body.decision === 'approve-for-session' &&
+      !interaction.canApproveSession
+    ) {
+      return {
+        status: 400,
+        error: 'Session approval is unavailable for this request.',
       }
-      case 'assistant.message':
-        if (!receivedDelta && typeof event.data?.content === 'string') {
-          writeEvent(response, 'delta', { content: event.data.content })
-        }
-        writeEvent(response, 'message', {
-          model: event.data?.model || null,
-          outputTokens: event.data?.outputTokens || null,
-        })
-        break
-      case 'tool.execution_start':
-      case 'tool.execution_complete':
-        writeEvent(response, 'tool', normalizeToolEvent(event))
-        break
-      case 'assistant.idle':
-        writeEvent(response, 'status', { status: 'idle' })
-        break
-      default:
-        if (event.type?.startsWith('assistant.reasoning')) {
-          writeEvent(response, 'status', { status: 'reasoning' })
-        }
+    }
+    result =
+      body.decision === 'reject'
+        ? {
+            kind: 'reject',
+            feedback: compactText(body.feedback, 500) || undefined,
+          }
+        : { kind: body.decision }
+  } else if (interaction.kind === 'user-input') {
+    const answer = typeof body.answer === 'string' ? body.answer.trim() : ''
+    const wasFreeform = body.wasFreeform === true
+    if (!answer || answer.length > 4_000) {
+      return {
+        status: 400,
+        error: 'An answer between 1 and 4,000 characters is required.',
+      }
+    }
+    if (wasFreeform && !interaction.allowFreeform) {
+      return { status: 400, error: 'Free-form answers are not allowed.' }
+    }
+    if (!wasFreeform && !interaction.choices.includes(answer)) {
+      return { status: 400, error: 'Select one of the available choices.' }
+    }
+    result = { answer, wasFreeform }
+  } else if (interaction.kind === 'plan') {
+    if (typeof body.approved !== 'boolean') {
+      return { status: 400, error: 'Plan approval is required.' }
+    }
+    const selectedAction =
+      typeof body.selectedAction === 'string' ? body.selectedAction : undefined
+    if (
+      body.approved &&
+      (!selectedAction || !interaction.actions.includes(selectedAction))
+    ) {
+      return { status: 400, error: 'Select an available plan action.' }
+    }
+    result = {
+      approved: body.approved,
+      selectedAction: body.approved ? selectedAction : undefined,
+      feedback: compactText(body.feedback, 2_000) || undefined,
     }
   }
 
-  child.stdout.setEncoding('utf8')
-  child.stdout.on('data', (chunk) => {
-    stdoutBuffer += chunk
-    let newlineIndex = stdoutBuffer.indexOf('\n')
-    while (newlineIndex >= 0) {
-      processLine(stdoutBuffer.slice(0, newlineIndex))
-      stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1)
-      newlineIndex = stdoutBuffer.indexOf('\n')
-    }
-  })
-
-  child.stderr.setEncoding('utf8')
-  child.stderr.on('data', (chunk) => {
-    if (stderr.length < 8_000) stderr += chunk
-  })
-
-  child.on('error', (error) => {
-    completed = true
-    activeRuns.delete(runId)
-    writeEvent(response, 'error', {
-      message: `Unable to start Copilot CLI: ${error.message}`,
-    })
-    response.end()
-  })
-
-  child.on('close', (exitCode) => {
-    if (completed) return
-    completed = true
-    activeRuns.delete(runId)
-    processLine(stdoutBuffer)
-
-    if (exitCode === 0) {
-      sessionCatalogUpdatedAt = 0
-      writeEvent(response, 'done', { sessionId })
-    } else {
-      writeEvent(response, 'error', {
-        message:
-          stderr.trim() ||
-          `Copilot CLI exited with code ${exitCode ?? 'unknown'}.`,
-      })
-    }
-    response.end()
-  })
-
-  response.on('close', () => {
-    if (!completed && child.exitCode === null) {
-      child.kill()
-      activeRuns.delete(runId)
-    }
-  })
+  run.pendingInteractions.delete(requestId)
+  pending.resolve(result)
+  writeEvent(run.response, 'interaction-resolved', { requestId })
+  return { status: 200, value: { ok: true } }
 }
 
 async function serveStatic(response, pathname) {
@@ -650,6 +914,32 @@ const server = createServer(async (request, response) => {
     return
   }
 
+  const interactionRoute = url.pathname.match(
+    /^\/api\/runs\/([0-9a-f-]+)\/interactions\/([0-9a-f-]+)$/i,
+  )
+  if (request.method === 'POST' && interactionRoute) {
+    const [, runId, requestId] = interactionRoute
+    if (!isSessionId(runId) || !isSessionId(requestId)) {
+      sendJson(response, 400, { error: 'Invalid interaction identifier.' })
+      return
+    }
+    const run = activeRuns.get(runId)
+    if (!run) {
+      sendJson(response, 409, { error: 'This Copilot run is no longer active.' })
+      return
+    }
+    try {
+      const result = resolveInteraction(run, requestId, await readJson(request))
+      sendJson(response, result.status, result.value || { error: result.error })
+    } catch (error) {
+      sendJson(response, 400, {
+        error:
+          error instanceof Error ? error.message : 'Invalid interaction response.',
+      })
+    }
+    return
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/chat') {
     if (!request.headers['content-type']?.startsWith('application/json')) {
       sendJson(response, 415, { error: 'Content-Type must be application/json.' })
@@ -684,7 +974,12 @@ server.listen(port, host, () => {
 })
 
 async function shutdown() {
-  for (const child of activeRuns.values()) child.kill()
+  await Promise.all(
+    [...activeRuns.values()].map(async (run) => {
+      run.completed = true
+      await closeRun(run, true)
+    }),
+  )
   if (sdkClient) await sdkClient.stop()
   server.close(() => process.exit(0))
 }

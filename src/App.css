@@ -1190,6 +1190,237 @@ kbd {
   font-size: 8px;
 }
 
+.activity-timeline {
+  margin: 2px 2px 13px 31px;
+}
+
+.activity-timeline summary {
+  align-items: center;
+  color: #756b7b;
+  cursor: pointer;
+  display: flex;
+  font-size: 9px;
+  font-weight: 650;
+  gap: 5px;
+  list-style: none;
+  min-height: 24px;
+}
+
+.activity-timeline summary::-webkit-details-marker {
+  display: none;
+}
+
+.activity-timeline summary span {
+  color: #a097a5;
+  font-size: 8px;
+  font-weight: 500;
+  margin-left: 3px;
+}
+
+.activity-steps {
+  border-left: 1px solid #ded7e2;
+  margin: 3px 0 0 6px;
+  padding: 2px 0 2px 10px;
+}
+
+.chat-progress {
+  align-items: flex-start;
+  color: #746b79;
+  display: flex;
+  font-size: 9px;
+  gap: 6px;
+  line-height: 1.45;
+  padding: 4px 0;
+}
+
+.chat-progress.intent {
+  color: #554b5b;
+  font-weight: 600;
+}
+
+.progress-step-icon {
+  align-items: center;
+  color: #8b5cac;
+  display: inline-flex;
+  flex: 0 0 13px;
+  height: 14px;
+  justify-content: center;
+}
+
+.interaction-card {
+  background: #fff;
+  border: 1px solid #dcd3e1;
+  border-radius: 10px;
+  box-shadow: 0 5px 18px rgba(48, 36, 57, 0.09);
+  margin: 10px 3px 15px 31px;
+  padding: 12px;
+}
+
+.interaction-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 9px;
+}
+
+.interaction-icon {
+  align-items: center;
+  background: #eee7f4;
+  border-radius: 8px;
+  color: #7c4c9d;
+  display: flex;
+  flex: 0 0 auto;
+  height: 30px;
+  justify-content: center;
+  width: 30px;
+}
+
+.interaction-heading > div {
+  min-width: 0;
+}
+
+.interaction-heading small {
+  color: #8b808f;
+  display: block;
+  font-size: 8px;
+  font-weight: 650;
+  margin-bottom: 3px;
+  text-transform: uppercase;
+}
+
+.interaction-heading strong {
+  color: #3b3340;
+  display: block;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.interaction-card pre {
+  background: #f5f2f6;
+  border: 1px solid #e7e0ea;
+  border-radius: 7px;
+  color: #4e4553;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 9px;
+  line-height: 1.5;
+  margin: 10px 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 9px;
+  white-space: pre-wrap;
+}
+
+.interaction-warning {
+  align-items: center;
+  background: #fff4df;
+  border-radius: 6px;
+  color: #8a5a10;
+  display: flex;
+  font-size: 9px;
+  gap: 5px;
+  margin-top: 9px;
+  padding: 7px 8px;
+}
+
+.interaction-actions,
+.interaction-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 11px;
+}
+
+.interaction-button,
+.interaction-choices button,
+.interaction-freeform button {
+  background: #fff;
+  border: 1px solid #d7cddd;
+  border-radius: 7px;
+  color: #5c5063;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 650;
+  min-height: 30px;
+  padding: 0 10px;
+}
+
+.interaction-button:hover,
+.interaction-choices button:hover,
+.interaction-freeform button:hover {
+  background: #f3eef6;
+  border-color: #bba8c7;
+}
+
+.interaction-button.primary {
+  background: #744399;
+  border-color: #744399;
+  color: #fff;
+}
+
+.interaction-button.reject {
+  color: #9a424d;
+  margin-right: auto;
+}
+
+.interaction-card details {
+  margin-top: 10px;
+}
+
+.interaction-card details summary {
+  color: #735487;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.interaction-markdown {
+  background: #f8f6f9;
+  border-radius: 7px;
+  margin-top: 7px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 9px;
+}
+
+.interaction-freeform {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.interaction-freeform input {
+  background: #faf8fb;
+  border: 1px solid #ded6e2;
+  border-radius: 7px;
+  color: #443b49;
+  flex: 1;
+  font: inherit;
+  font-size: 10px;
+  min-height: 34px;
+  min-width: 0;
+  outline: 0;
+  padding: 0 9px;
+}
+
+.interaction-freeform input:focus {
+  border-color: #9b70b7;
+  box-shadow: 0 0 0 2px rgba(134, 81, 171, 0.12);
+}
+
+.interaction-card button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.interaction-error {
+  background: #fff0f1;
+  border: 1px solid #edc9ce;
+  border-radius: 7px;
+  color: #9b3f4a;
+  font-size: 9px;
+  margin: 8px 3px 12px 31px;
+  padding: 8px 10px;
+}
+
 .chat-message {
   align-items: flex-start;
   display: flex;
@@ -2047,6 +2278,64 @@ kbd {
 
   .detail-panel.chat-active .history-load-more span {
     font-size: 10px;
+  }
+
+  .detail-panel.chat-active .activity-timeline {
+    margin: 3px 3px 17px 39px;
+  }
+
+  .detail-panel.chat-active .activity-timeline summary,
+  .detail-panel.chat-active .chat-progress {
+    font-size: 12px;
+  }
+
+  .detail-panel.chat-active .activity-timeline summary {
+    min-height: 36px;
+  }
+
+  .detail-panel.chat-active .activity-timeline summary span {
+    font-size: 10px;
+  }
+
+  .detail-panel.chat-active .chat-progress {
+    padding: 6px 0;
+  }
+
+  .detail-panel.chat-active .interaction-card {
+    margin: 10px 0 17px 39px;
+    padding: 13px;
+  }
+
+  .detail-panel.chat-active .interaction-heading small {
+    font-size: 10px;
+  }
+
+  .detail-panel.chat-active .interaction-heading strong {
+    font-size: 14px;
+  }
+
+  .detail-panel.chat-active .interaction-card pre,
+  .detail-panel.chat-active .interaction-warning,
+  .detail-panel.chat-active .interaction-card details summary {
+    font-size: 12px;
+  }
+
+  .detail-panel.chat-active .interaction-button,
+  .detail-panel.chat-active .interaction-choices button,
+  .detail-panel.chat-active .interaction-freeform button {
+    font-size: 12px;
+    min-height: 42px;
+    padding: 0 13px;
+  }
+
+  .detail-panel.chat-active .interaction-freeform input {
+    font-size: 16px;
+    min-height: 44px;
+  }
+
+  .detail-panel.chat-active .interaction-error {
+    font-size: 12px;
+    margin-left: 39px;
   }
 
   .detail-panel.chat-active .chat-message {

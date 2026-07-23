@@ -1,3 +1,41 @@
+export type CopilotInteraction =
+  | {
+      requestId: string
+      kind: 'permission'
+      permissionKind: string
+      title: string
+      detail: string
+      canApproveSession: boolean
+      elevated: boolean
+    }
+  | {
+      requestId: string
+      kind: 'user-input'
+      question: string
+      choices: string[]
+      allowFreeform: boolean
+    }
+  | {
+      requestId: string
+      kind: 'plan'
+      summary: string
+      planContent: string
+      actions: string[]
+      recommendedAction: string
+    }
+
+export type CopilotInteractionResponse =
+  | {
+      decision: 'approve-once' | 'approve-for-session' | 'reject'
+      feedback?: string
+    }
+  | { answer: string; wasFreeform: boolean }
+  | {
+      approved: boolean
+      selectedAction?: string
+      feedback?: string
+    }
+
 export type CopilotStreamEvent =
   | {
       type: 'session'
@@ -9,6 +47,15 @@ export type CopilotStreamEvent =
   | { type: 'delta'; content: string }
   | { type: 'message'; model: string | null; outputTokens: number | null }
   | { type: 'tool'; name: string; status: 'running' | 'complete' }
+  | {
+      type: 'progress'
+      id: string
+      kind: 'intent' | 'reasoning' | 'tool'
+      label: string
+      status: 'running' | 'complete'
+    }
+  | ({ type: 'interaction' } & CopilotInteraction)
+  | { type: 'interaction-resolved'; requestId: string }
   | { type: 'done'; sessionId: string }
   | { type: 'error'; message: string }
 
@@ -19,6 +66,27 @@ interface StreamMessageOptions {
   allowTools: boolean
   signal: AbortSignal
   onEvent: (event: CopilotStreamEvent) => void
+}
+
+export async function respondToCopilotInteraction(
+  runId: string,
+  requestId: string,
+  value: CopilotInteractionResponse,
+) {
+  const response = await fetch(
+    `/api/runs/${runId}/interactions/${requestId}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(value),
+    },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as {
+      error?: string
+    } | null
+    throw new Error(body?.error || 'Unable to submit this response.')
+  }
 }
 
 function parseEvent(block: string): CopilotStreamEvent | null {
@@ -100,9 +168,12 @@ export async function getBridgeHealth(signal?: AbortSignal) {
 
 export interface SessionHistoryMessage {
   id: string
-  role: 'assistant' | 'user'
+  role: 'assistant' | 'progress' | 'user'
   content: string
   timestamp: string
+  progressKind?: 'intent' | 'reasoning' | 'tool'
+  label?: string
+  status?: 'running' | 'complete'
 }
 
 export async function getSessionHistory(

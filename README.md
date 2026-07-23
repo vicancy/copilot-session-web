@@ -12,6 +12,18 @@ Chat initially focuses on the latest four conversation rounds; **Load more**
 reveals four earlier rounds at a time without shifting the current reading
 position.
 
+SDK-managed web runs can pause for user interaction. Permission cards support
+**Approve once**, session-scoped approval when the runtime offers it, and
+**Reject**. `ask_user` questions render as selectable options with optional
+free-form input, and plan mode renders its available continuation actions.
+**Auto-approve tools** skips individual permission prompts for the current run.
+
+The chat also shows a collapsible **Working** timeline built from Copilot's
+user-facing intent and tool lifecycle events. It intentionally does not expose
+raw hidden model reasoning or raw tool output. Existing work that is resumed by
+the web bridge uses the SDK's pending-work continuation support; a process that
+is not attachable still remains under the control of its original client.
+
 ## Run locally
 
 ```powershell
