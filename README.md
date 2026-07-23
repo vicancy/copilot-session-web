@@ -4,6 +4,8 @@ A React and TypeScript dashboard for viewing and controlling Copilot projects
 and sessions in one place. It uses the official `@github/copilot-sdk` to read
 the shared Copilot session store, including Copilot App chats and project
 workspaces, and resumes selected session UUIDs through GitHub Copilot CLI.
+On phones, selecting a session opens a full-height chat view with touch-sized
+controls, a keyboard-safe composer, and back navigation to the session list.
 
 ## Run locally
 

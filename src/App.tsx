@@ -6,6 +6,7 @@ import {
   Bot,
   Check,
   ChevronDown,
+  ChevronLeft,
   CircleDotDashed,
   Code2,
   Command,
@@ -147,6 +148,23 @@ function App() {
       )
   }, [])
 
+  useEffect(() => {
+    const mobileQuery = window.matchMedia('(max-width: 640px)')
+    const syncBodyScroll = () => {
+      document.body.classList.toggle(
+        'mobile-chat-open',
+        detailView === 'chat' && mobileQuery.matches,
+      )
+    }
+
+    syncBodyScroll()
+    mobileQuery.addEventListener('change', syncBodyScroll)
+    return () => {
+      mobileQuery.removeEventListener('change', syncBodyScroll)
+      document.body.classList.remove('mobile-chat-open')
+    }
+  }, [detailView])
+
   const filteredSessions = useMemo(() => {
     if (!snapshot) return []
     const normalizedQuery = query.trim().toLowerCase()
@@ -210,7 +228,9 @@ function App() {
 
   const selectSession = (sessionId: string) => {
     setSelectedSessionId(sessionId)
-    setDetailView('details')
+    setDetailView(
+      window.matchMedia('(max-width: 640px)').matches ? 'chat' : 'details',
+    )
     setIsSidebarOpen(false)
   }
 
@@ -604,9 +624,28 @@ function App() {
           </div>
 
           {selectedSession && selectedProject && (
-            <aside className="detail-panel">
+            <aside
+              className={
+                detailView === 'chat'
+                  ? 'detail-panel chat-active'
+                  : 'detail-panel'
+              }
+            >
               <div className="detail-topline">
-                <StatusBadge status={selectedSession.status} />
+                <div className="detail-topline-leading">
+                  <button
+                    className="mobile-chat-back"
+                    type="button"
+                    onClick={() => {
+                      setDetailView('details')
+                      setIsSidebarOpen(true)
+                    }}
+                  >
+                    <ChevronLeft size={17} />
+                    Sessions
+                  </button>
+                  <StatusBadge status={selectedSession.status} />
+                </div>
                 <div className="detail-tabs">
                   <button
                     className={detailView === 'details' ? 'active' : ''}
