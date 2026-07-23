@@ -14,6 +14,7 @@ import {
   ChevronUp,
   CircleHelp,
   CircleStop,
+  CornerUpRight,
   ListChecks,
   LoaderCircle,
   RefreshCw,
@@ -31,6 +32,7 @@ import {
   getBridgeHealth,
   getSessionHistory,
   respondToCopilotInteraction,
+  steerCopilotRun,
   streamCopilotMessage,
 } from '../data/copilotClient'
 import type {
@@ -49,6 +51,16 @@ interface ChatMessage {
   progressKind?: 'intent' | 'reasoning' | 'tool'
   label?: string
   status?: 'running' | 'complete'
+  variant?: 'steering'
+}
+
+interface PendingSteering {
+  requestId: string
+  runId: string
+  assistantMessageId: string
+  content: string
+  acknowledged: boolean
+  postComplete: boolean
 }
 
 const INITIAL_VISIBLE_ROUNDS = 4
@@ -367,6 +379,8 @@ export function ChatPanel({ session }: { session: Session }) {
   const [input, setInput] = useState('')
   const [allowTools, setAllowTools] = useState(false)
   const [isSending, setIsSending] = useState(false)
+  const [isSteering, setIsSteering] = useState(false)
+  const [runReady, setRunReady] = useState(false)
   const [streamStatus, setStreamStatus] = useState('Ready')
   const [bridgeOnline, setBridgeOnline] = useState<boolean | null>(null)
   const [historyLoading, setHistoryLoading] = useState(
@@ -380,6 +394,9 @@ export function ChatPanel({ session }: { session: Session }) {
   )
   const abortController = useRef<AbortController | null>(null)
   const activeRunId = useRef('')
+  const activeAssistantMessageId = useRef('')
+  const pendingSteering = useRef<PendingSteering | null>(null)
+  const activeInteractionResponse = useRef('')
   const messagesContainer = useRef<HTMLDivElement | null>(null)
   const scrollAnchor = useRef<HTMLDivElement | null>(null)
   const pendingScrollRestore = useRef<{
@@ -483,14 +500,64 @@ export function ChatPanel({ session }: { session: Session }) {
     [],
   )
 
-  const handleStreamEvent = (
-    event: CopilotStreamEvent,
-    assistantMessageId: string,
-  ) => {
+  const acknowledgeSteering = (requestId: string) => {
+    const pending = pendingSteering.current
+    if (
+      !pending ||
+      pending.requestId !== requestId ||
+      pending.runId !== activeRunId.current
+    ) {
+      return
+    }
+
+    const nextAssistantMessage: ChatMessage = {
+      id: `assistant-steer-${Date.now()}`,
+      role: 'assistant',
+      content: '',
+    }
+    activeAssistantMessageId.current = nextAssistantMessage.id
+    pending.acknowledged = true
+    setMessages((current) => {
+      const assistantIndex = current.findIndex(
+        (message) => message.id === pending.assistantMessageId,
+      )
+      const steeringMessage: ChatMessage = {
+        id: `steer-${Date.now()}`,
+        role: 'user',
+        content: pending.content,
+        variant: 'steering',
+      }
+      if (assistantIndex < 0) {
+        return [...current, steeringMessage, nextAssistantMessage]
+      }
+      const assistantMessage = current[assistantIndex]
+      return [
+        ...current.slice(0, assistantIndex),
+        ...(assistantMessage.content ? [assistantMessage] : []),
+        steeringMessage,
+        nextAssistantMessage,
+        ...current.slice(assistantIndex + 1),
+      ]
+    })
+    setStreamStatus('Steering accepted')
+
+    if (pending.postComplete) {
+      pendingSteering.current = null
+      setIsSteering(false)
+    }
+  }
+
+  const handleStreamEvent = (event: CopilotStreamEvent) => {
     switch (event.type) {
       case 'session':
         activeRunId.current = event.runId
         localStorage.setItem(sessionStorageKey(session.id), event.sessionId)
+        break
+      case 'ready':
+        if (event.runId === activeRunId.current) setRunReady(true)
+        break
+      case 'steer-accepted':
+        acknowledgeSteering(event.requestId)
         break
       case 'status':
         setStreamStatus(
@@ -501,7 +568,8 @@ export function ChatPanel({ session }: { session: Session }) {
               : 'Finishing',
         )
         break
-      case 'delta':
+      case 'delta': {
+        const assistantMessageId = activeAssistantMessageId.current
         setMessages((current) =>
           updateMessage(current, assistantMessageId, (message) => ({
             ...message,
@@ -509,6 +577,7 @@ export function ChatPanel({ session }: { session: Session }) {
           })),
         )
         break
+      }
       case 'tool':
         setStreamStatus(
           event.status === 'complete'
@@ -516,7 +585,8 @@ export function ChatPanel({ session }: { session: Session }) {
             : `Using ${event.name}`,
         )
         break
-      case 'progress':
+      case 'progress': {
+        const assistantMessageId = activeAssistantMessageId.current
         setMessages((current) => {
           const id = `progress-${event.id}`
           const progressMessage: ChatMessage = {
@@ -542,6 +612,7 @@ export function ChatPanel({ session }: { session: Session }) {
           ]
         })
         break
+      }
       case 'interaction':
         setInteractions((current) => [
           ...current.filter(
@@ -562,7 +633,8 @@ export function ChatPanel({ session }: { session: Session }) {
       case 'message':
         if (event.model) setStreamStatus(event.model)
         break
-      case 'error':
+      case 'error': {
+        const assistantMessageId = activeAssistantMessageId.current
         setInteractions([])
         setMessages((current) =>
           updateMessage(current, assistantMessageId, (message) => ({
@@ -572,8 +644,10 @@ export function ChatPanel({ session }: { session: Session }) {
           })),
         )
         break
+      }
       case 'done':
         setInteractions([])
+        setRunReady(false)
         setStreamStatus('Ready')
         break
     }
@@ -601,6 +675,10 @@ export function ChatPanel({ session }: { session: Session }) {
     setInteractionError('')
     setRespondingInteractionId('')
     activeRunId.current = ''
+    activeAssistantMessageId.current = assistantMessageId
+    pendingSteering.current = null
+    activeInteractionResponse.current = ''
+    setRunReady(false)
     setInput('')
     setIsSending(true)
     setStreamStatus('Connecting')
@@ -615,7 +693,7 @@ export function ChatPanel({ session }: { session: Session }) {
         mode: session.mode,
         allowTools,
         signal: controller.signal,
-        onEvent: (event) => handleStreamEvent(event, assistantMessageId),
+        onEvent: handleStreamEvent,
       })
     } catch (error) {
       if (controller.signal.aborted) {
@@ -637,8 +715,14 @@ export function ChatPanel({ session }: { session: Session }) {
         setBridgeOnline(false)
       }
     } finally {
+      controller.abort()
       abortController.current = null
       activeRunId.current = ''
+      activeAssistantMessageId.current = ''
+      pendingSteering.current = null
+      activeInteractionResponse.current = ''
+      setRunReady(false)
+      setIsSteering(false)
       setInteractions([])
       setInteractionError('')
       setRespondingInteractionId('')
@@ -651,34 +735,128 @@ export function ChatPanel({ session }: { session: Session }) {
     requestId: string,
     value: CopilotInteractionResponse,
   ) => {
-    if (!activeRunId.current || respondingInteractionId) return
+    const runId = activeRunId.current
+    const controller = abortController.current
+    if (!runId || !controller || respondingInteractionId) return
+    const responseToken = `${runId}:${requestId}`
+    activeInteractionResponse.current = responseToken
     setRespondingInteractionId(requestId)
     setInteractionError('')
     try {
       await respondToCopilotInteraction(
-        activeRunId.current,
+        runId,
         requestId,
         value,
+        controller.signal,
       )
+      if (
+        controller.signal.aborted ||
+        activeRunId.current !== runId ||
+        activeInteractionResponse.current !== responseToken
+      ) {
+        return
+      }
       setInteractions((current) =>
         current.filter((interaction) => interaction.requestId !== requestId),
       )
       setStreamStatus('Continuing')
     } catch (error) {
-      setInteractionError(
-        error instanceof Error
-          ? error.message
-          : 'Unable to submit this response.',
-      )
+      if (
+        !controller.signal.aborted &&
+        activeRunId.current === runId &&
+        activeInteractionResponse.current === responseToken
+      ) {
+        setInteractionError(
+          error instanceof Error
+            ? error.message
+            : 'Unable to submit this response.',
+        )
+      }
     } finally {
-      setRespondingInteractionId('')
+      if (activeInteractionResponse.current === responseToken) {
+        activeInteractionResponse.current = ''
+        setRespondingInteractionId('')
+      }
+    }
+  }
+
+  const sendSteering = async () => {
+    const content = input.trim()
+    const runId = activeRunId.current
+    const assistantMessageId = activeAssistantMessageId.current
+    const controller = abortController.current
+    if (
+      !content ||
+      !isSending ||
+      !runReady ||
+      !runId ||
+      !assistantMessageId ||
+      !controller ||
+      isSteering ||
+      interactions.length > 0
+    ) {
+      return
+    }
+
+    setInput('')
+    setIsSteering(true)
+    setInteractionError('')
+    const requestId = crypto.randomUUID()
+    pendingSteering.current = {
+      requestId,
+      runId,
+      assistantMessageId,
+      content,
+      acknowledged: false,
+      postComplete: false,
+    }
+    try {
+      await steerCopilotRun(runId, requestId, content, controller.signal)
+      const pending = pendingSteering.current
+      if (
+        controller.signal.aborted ||
+        activeRunId.current !== runId ||
+        !pending ||
+        pending.requestId !== requestId
+      ) {
+        return
+      }
+      pending.postComplete = true
+      if (pending.acknowledged) {
+        pendingSteering.current = null
+        setIsSteering(false)
+      }
+    } catch (error) {
+      const pending = pendingSteering.current
+      if (
+        !controller.signal.aborted &&
+        activeRunId.current === runId &&
+        pending?.requestId === requestId
+      ) {
+        if (!pending.acknowledged) {
+          setInput((current) => current || content)
+          setInteractionError(
+            error instanceof Error ? error.message : 'Unable to steer this run.',
+          )
+        }
+        pendingSteering.current = null
+        setIsSteering(false)
+      }
+    }
+  }
+
+  const submitComposer = () => {
+    if (isSending) {
+      void sendSteering()
+    } else {
+      void sendMessage()
     }
   }
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
-      void sendMessage()
+      submitComposer()
     }
   }
 
@@ -765,7 +943,9 @@ export function ChatPanel({ session }: { session: Session }) {
             />
           ) : (
             <div
-              className={`chat-message ${item.message.role}`}
+              className={`chat-message ${item.message.role} ${
+                item.message.variant || ''
+              }`}
               key={item.message.id}
             >
               <div className="message-avatar">
@@ -781,7 +961,9 @@ export function ChatPanel({ session }: { session: Session }) {
                 {item.message.role !== 'tool' && (
                   <strong>
                     {item.message.role === 'user'
-                      ? 'You'
+                      ? item.message.variant === 'steering'
+                        ? 'You · steering'
+                        : 'You'
                       : item.message.role === 'error'
                         ? 'Copilot error'
                         : 'Copilot'}
@@ -809,7 +991,7 @@ export function ChatPanel({ session }: { session: Session }) {
                       <p>{item.message.content}</p>
                   )
                 ) : isSending &&
-                  item.message.id.startsWith('assistant-') ? (
+                  item.message.id === activeAssistantMessageId.current ? (
                   <p>
                     <span className="typing-indicator">
                       <i />
@@ -855,9 +1037,15 @@ export function ChatPanel({ session }: { session: Session }) {
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask Copilot to inspect, explain, or change code..."
+          placeholder={
+            interactions.length > 0
+              ? 'Resolve the pending request above to continue...'
+              : isSending
+                ? 'Steer the active run with new guidance...'
+                : 'Ask Copilot to inspect, explain, or change code...'
+          }
           rows={3}
-          disabled={isSending || historyLoading}
+          disabled={historyLoading || isSteering || interactions.length > 0}
         />
         <div className="composer-toolbar">
           <label
@@ -874,14 +1062,34 @@ export function ChatPanel({ session }: { session: Session }) {
             Auto-approve tools
           </label>
           {isSending ? (
-            <button
-              className="send-button stop"
-              type="button"
-              aria-label="Stop Copilot"
-              onClick={() => abortController.current?.abort()}
-            >
-              <CircleStop size={15} />
-            </button>
+            <div className="composer-run-actions">
+              <button
+                className="steer-button"
+                type="button"
+                disabled={
+                  !input.trim() ||
+                  !runReady ||
+                  isSteering ||
+                  interactions.length > 0
+                }
+                onClick={() => void sendSteering()}
+              >
+                {isSteering ? (
+                  <LoaderCircle size={14} className="spinning" />
+                ) : (
+                  <CornerUpRight size={14} />
+                )}
+                Steer
+              </button>
+              <button
+                className="send-button stop"
+                type="button"
+                aria-label="Stop Copilot"
+                onClick={() => abortController.current?.abort()}
+              >
+                <CircleStop size={15} />
+              </button>
+            </div>
           ) : (
             <button
               className="send-button"
@@ -890,7 +1098,7 @@ export function ChatPanel({ session }: { session: Session }) {
               disabled={
                 !input.trim() || bridgeOnline === false || historyLoading
               }
-              onClick={() => void sendMessage()}
+              onClick={submitComposer}
             >
               <Send size={15} />
             </button>
@@ -900,9 +1108,11 @@ export function ChatPanel({ session }: { session: Session }) {
 
       <div className="chat-safety">
         {allowTools ? <TerminalSquare size={12} /> : <Sparkles size={12} />}
-        {allowTools
-          ? 'Tool permission requests are approved automatically for this run.'
-          : 'Approval mode: risky tools pause and wait for your decision.'}
+        {isSending
+          ? 'Steering updates the current run immediately without starting a new session.'
+          : allowTools
+            ? 'Tool permission requests are approved automatically for this run.'
+            : 'Approval mode: risky tools pause and wait for your decision.'}
       </div>
     </div>
   )

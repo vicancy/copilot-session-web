@@ -17,12 +17,19 @@ SDK-managed web runs can pause for user interaction. Permission cards support
 **Reject**. `ask_user` questions render as selectable options with optional
 free-form input, and plan mode renders its available continuation actions.
 **Auto-approve tools** skips individual permission prompts for the current run.
+While a web-managed run is active, the composer switches to **Steer** mode:
+new guidance is delivered immediately to the same SDK run without starting a
+new session. Steering pauses while a permission, question, or plan response
+needs an explicit answer.
 
 The chat also shows a collapsible **Working** timeline built from Copilot's
 user-facing intent and tool lifecycle events. It intentionally does not expose
 raw hidden model reasoning or raw tool output. Existing work that is resumed by
 the web bridge uses the SDK's pending-work continuation support; a process that
 is not attachable still remains under the control of its original client.
+Steering therefore works for runs started or resumed by this web bridge, but it
+cannot take over a separately running Copilot App or terminal CLI process, even
+when that process is on the same machine.
 
 ## Run locally
 

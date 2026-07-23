@@ -43,6 +43,8 @@ export type CopilotStreamEvent =
       sessionId: string
       allowTools: boolean
     }
+  | { type: 'ready'; runId: string }
+  | { type: 'steer-accepted'; requestId: string; messageId: string }
   | { type: 'status'; status: 'thinking' | 'reasoning' | 'idle' }
   | { type: 'delta'; content: string }
   | { type: 'message'; model: string | null; outputTokens: number | null }
@@ -72,6 +74,7 @@ export async function respondToCopilotInteraction(
   runId: string,
   requestId: string,
   value: CopilotInteractionResponse,
+  signal?: AbortSignal,
 ) {
   const response = await fetch(
     `/api/runs/${runId}/interactions/${requestId}`,
@@ -79,6 +82,7 @@ export async function respondToCopilotInteraction(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(value),
+      signal,
     },
   )
   if (!response.ok) {
@@ -87,6 +91,27 @@ export async function respondToCopilotInteraction(
     } | null
     throw new Error(body?.error || 'Unable to submit this response.')
   }
+}
+
+export async function steerCopilotRun(
+  runId: string,
+  requestId: string,
+  message: string,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(`/api/runs/${runId}/steer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestId, message }),
+    signal,
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as {
+      error?: string
+    } | null
+    throw new Error(body?.error || 'Unable to steer this Copilot run.')
+  }
+  return (await response.json()) as { ok: true; messageId: string }
 }
 
 function parseEvent(block: string): CopilotStreamEvent | null {

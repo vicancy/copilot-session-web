@@ -1472,6 +1472,15 @@ kbd {
   color: white;
 }
 
+.chat-message.user.steering .message-body {
+  background: #6e3f8c;
+  border-color: #6e3f8c;
+}
+
+.chat-message.user.steering .message-avatar {
+  background: #6e3f8c;
+}
+
 .chat-message.tool .message-body {
   background: #f3eef7;
   border: 0;
@@ -1766,6 +1775,35 @@ kbd {
 
 .send-button.stop {
   background: #a74750;
+}
+
+.composer-run-actions {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.steer-button {
+  align-items: center;
+  background: #7b45a0;
+  border: 0;
+  border-radius: 6px;
+  color: white;
+  cursor: pointer;
+  display: flex;
+  font: 600 9px var(--font-sans);
+  gap: 5px;
+  height: 28px;
+  padding: 0 9px;
+}
+
+.steer-button:hover {
+  background: #663683;
+}
+
+.steer-button:disabled {
+  background: #d9d4dc;
+  cursor: not-allowed;
 }
 
 .chat-safety {
@@ -2400,6 +2438,13 @@ kbd {
     border-radius: 8px;
     height: 40px;
     width: 42px;
+  }
+
+  .detail-panel.chat-active .steer-button {
+    border-radius: 8px;
+    font-size: 11px;
+    height: 40px;
+    padding-inline: 12px;
   }
 
   .detail-panel.chat-active .chat-safety {

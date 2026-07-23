@@ -482,6 +482,7 @@ function requestInteraction(run, interaction) {
     return Promise.resolve(unavailableInteractionResult(interaction))
   }
 
+  run.acceptingSteers = false
   const requestId = randomUUID()
   return new Promise((resolveInteraction) => {
     run.pendingInteractions.set(requestId, {
@@ -499,9 +500,69 @@ function settlePendingInteractions(run) {
   run.pendingInteractions.clear()
 }
 
+function waitForSessionIdle(
+  session,
+  expectedPrompt,
+  timeout = 30 * 60 * 1_000,
+) {
+  let settled = false
+  let promptObserved = false
+  let resolveWait
+  let rejectWait
+  const promise = new Promise((resolve, reject) => {
+    resolveWait = resolve
+    rejectWait = reject
+  })
+  const unsubscribe = session.on((event) => {
+    if (
+      event.type === 'user.message' &&
+      event.data?.content === expectedPrompt
+    ) {
+      promptObserved = true
+    } else if (event.type === 'session.idle' && promptObserved) {
+      settle(resolveWait)
+    } else if (event.type === 'session.error') {
+      settle(
+        rejectWait,
+        new Error(event.data?.message || 'Copilot session failed.'),
+      )
+    }
+  })
+  const timeoutId = setTimeout(
+    () =>
+      settle(
+        rejectWait,
+        new Error(`Timeout after ${timeout}ms waiting for Copilot to become idle.`),
+      ),
+    timeout,
+  )
+  void promise.catch(() => {})
+
+  function settle(callback, value) {
+    if (settled) return
+    settled = true
+    clearTimeout(timeoutId)
+    unsubscribe()
+    callback(value)
+  }
+
+  return {
+    promise,
+    cancel: (error = new Error('Copilot run closed.')) =>
+      settle(rejectWait, error),
+  }
+}
+
 async function closeRun(run, abort = false) {
   if (run.closed) return
   run.closed = true
+  run.ready = false
+  run.acceptingSteers = false
+  run.cancelInitialWait?.()
+  run.cancelInitialWait = null
+  run.steeringBoundary = null
+  for (const steer of run.pendingSteers.values()) steer.cancel()
+  run.pendingSteers.clear()
   settlePendingInteractions(run)
   run.unsubscribe?.()
 
@@ -514,6 +575,10 @@ async function closeRun(run, abort = false) {
 
 function processSessionEvent(run, event) {
   if (event.agentId) return
+  if (run.steeringBoundary) {
+    run.steeringBoundary.events.push(event)
+    return
+  }
 
   switch (event.type) {
     case 'assistant.turn_start':
@@ -635,8 +700,13 @@ async function streamCopilot(request, response, body) {
     session: null,
     unsubscribe: null,
     pendingInteractions: new Map(),
+    pendingSteers: new Map(),
     currentMessageStreamed: false,
     toolNames: new Map(),
+    cancelInitialWait: null,
+    steeringBoundary: null,
+    ready: false,
+    acceptingSteers: false,
     completed: false,
     closed: false,
   }
@@ -699,10 +769,30 @@ async function streamCopilot(request, response, body) {
     }
     run.unsubscribe = run.session.on((event) => processSessionEvent(run, event))
 
-    await run.session.sendAndWait(
-      { prompt: message, agentMode: mode },
-      30 * 60 * 1_000,
-    )
+    const initialWait = waitForSessionIdle(run.session, message)
+    run.cancelInitialWait = initialWait.cancel
+    try {
+      await run.session.send({ prompt: message, agentMode: mode })
+      if (run.closed) return
+      run.ready = true
+      run.acceptingSteers = run.pendingInteractions.size === 0
+      writeEvent(response, 'ready', { runId })
+      await initialWait.promise
+    } finally {
+      initialWait.cancel()
+      run.cancelInitialWait = null
+    }
+
+    while (run.pendingSteers.size > 0) {
+      const pendingSteers = [...run.pendingSteers.entries()]
+      const results = await Promise.allSettled(
+        pendingSteers.map(([, steer]) => steer.completion),
+      )
+      for (const [steerId] of pendingSteers) run.pendingSteers.delete(steerId)
+      const failed = results.find((result) => result.status === 'rejected')
+      if (failed?.status === 'rejected') throw failed.reason
+    }
+    run.acceptingSteers = false
     completedNormally = true
     if (!run.closed) {
       sessionCatalogUpdatedAt = 0
@@ -789,8 +879,108 @@ function resolveInteraction(run, requestId, body) {
 
   run.pendingInteractions.delete(requestId)
   pending.resolve(result)
+  if (
+    run.ready &&
+    !run.closed &&
+    !run.completed &&
+    run.pendingInteractions.size === 0
+  ) {
+    run.acceptingSteers = true
+  }
   writeEvent(run.response, 'interaction-resolved', { requestId })
   return { status: 200, value: { ok: true } }
+}
+
+function flushSteeringBoundary(run, requestId, messageId = '') {
+  const boundary = run.steeringBoundary
+  if (!boundary || boundary.requestId !== requestId) return
+
+  run.steeringBoundary = null
+  if (messageId) {
+    writeEvent(run.response, 'steer-accepted', { requestId, messageId })
+  }
+  for (const event of boundary.events) processSessionEvent(run, event)
+}
+
+function beginSteerDelivery(run, requestId, message) {
+  const steerId = randomUUID()
+  const idleWait = waitForSessionIdle(run.session, message)
+  let resolveQueued
+  let rejectQueued
+  const queued = new Promise((resolve, reject) => {
+    resolveQueued = resolve
+    rejectQueued = reject
+  })
+  run.steeringBoundary = { requestId, events: [] }
+  const completion = (async () => {
+    try {
+      const messageId = await run.session.send({
+        prompt: message,
+        mode: 'immediate',
+      })
+      flushSteeringBoundary(run, requestId, messageId)
+      resolveQueued(messageId)
+      await idleWait.promise
+    } catch (error) {
+      flushSteeringBoundary(run, requestId)
+      rejectQueued(error)
+      throw error
+    } finally {
+      idleWait.cancel()
+    }
+  })()
+
+  void completion.catch(() => {})
+  run.pendingSteers.set(steerId, {
+    completion,
+    cancel: idleWait.cancel,
+  })
+  return queued
+}
+
+async function steerRun(run, body) {
+  const message = typeof body.message === 'string' ? body.message.trim() : ''
+  const requestId =
+    typeof body.requestId === 'string' ? body.requestId.trim() : ''
+  if (!message || message.length > 16_000) {
+    return {
+      status: 400,
+      error: 'A steering message between 1 and 16,000 characters is required.',
+    }
+  }
+  if (!isSessionId(requestId)) {
+    return { status: 400, error: 'A valid steering request ID is required.' }
+  }
+  if (run.closed || run.completed) {
+    return { status: 409, error: 'This Copilot run is no longer active.' }
+  }
+  if (!run.session || !run.ready) {
+    return {
+      status: 409,
+      error: 'The Copilot run is still connecting. Try again in a moment.',
+    }
+  }
+  if (run.pendingInteractions.size > 0) {
+    return {
+      status: 409,
+      error: 'Resolve the pending approval or question before steering.',
+    }
+  }
+  if (!run.acceptingSteers) {
+    return { status: 409, error: 'This Copilot run is no longer active.' }
+  }
+  if (run.steeringBoundary) {
+    return {
+      status: 409,
+      error: 'Another steering message is still being delivered.',
+    }
+  }
+
+  const messageId = await beginSteerDelivery(run, requestId, message)
+  if (run.closed) {
+    return { status: 409, error: 'This Copilot run is no longer active.' }
+  }
+  return { status: 202, value: { ok: true, messageId } }
 }
 
 async function serveStatic(response, pathname) {
@@ -935,6 +1125,36 @@ const server = createServer(async (request, response) => {
       sendJson(response, 400, {
         error:
           error instanceof Error ? error.message : 'Invalid interaction response.',
+      })
+    }
+    return
+  }
+
+  const steerRoute = url.pathname.match(
+    /^\/api\/runs\/([0-9a-f-]+)\/steer$/i,
+  )
+  if (request.method === 'POST' && steerRoute) {
+    const runId = steerRoute[1]
+    if (!isSessionId(runId)) {
+      sendJson(response, 400, { error: 'Invalid run identifier.' })
+      return
+    }
+    if (!request.headers['content-type']?.startsWith('application/json')) {
+      sendJson(response, 415, { error: 'Content-Type must be application/json.' })
+      return
+    }
+    const run = activeRuns.get(runId)
+    if (!run) {
+      sendJson(response, 409, { error: 'This Copilot run is no longer active.' })
+      return
+    }
+    try {
+      const result = await steerRun(run, await readJson(request))
+      sendJson(response, result.status, result.value || { error: result.error })
+    } catch (error) {
+      sendJson(response, 409, {
+        error:
+          error instanceof Error ? error.message : 'Unable to steer this run.',
       })
     }
     return
